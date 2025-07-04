@@ -1,7 +1,7 @@
-# SendToTTS Application v1.0.6
+# SendToTTS Application v1.0.9
 # Reads clipboard content and converts to speech using Windows SAPI
 # Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
-# Local fallback: Enter key (works only when this window is focused)
+# Runs completely windowless in system tray by default, use --debug for console mode
 
 import win32com.client
 import win32clipboard
@@ -22,16 +22,10 @@ import win32gui
 import win32con
 import pystray
 from PIL import Image, ImageDraw
+import ctypes
+from ctypes import wintypes
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('tts_debug.log'),
-        logging.StreamHandler()
-    ]
-)
+# Logging will be configured in main() based on debug mode
 
 # Global variables
 voice = None
@@ -39,6 +33,8 @@ event_queue = queue.Queue()
 last_hotkey_time = time.time()
 running = True
 hotkey_handlers = []
+debug_mode = False
+tray_icon = None
 
 def load_settings():
     """Load settings from settings.ini"""
@@ -275,14 +271,17 @@ def register_hotkeys():
     """Register global hotkeys using keyboard library with robust error handling"""
     global hotkey_handlers
     
+    # Skip if hotkeys are already registered
+    if hotkey_handlers:
+        logging.debug("Hotkeys already registered, skipping")
+        return True
+    
     try:
-        # Clear any existing hotkeys
-        for handler in hotkey_handlers:
-            try:
-                keyboard.remove_hotkey(handler)
-            except:
-                pass
-        hotkey_handlers.clear()
+        # Ensure clean state - remove all hotkeys first
+        try:
+            keyboard.unhook_all_hotkeys()
+        except:
+            pass
         
         # Register new hotkeys with multiple attempts
         for attempt in range(3):
@@ -315,27 +314,15 @@ def unregister_hotkeys():
     global hotkey_handlers
     
     try:
-        for handler in hotkey_handlers:
-            try:
-                keyboard.remove_hotkey(handler)
-                logging.debug(f"Removed hotkey handler: {handler}")
-            except Exception as e:
-                logging.warning(f"Error removing hotkey handler {handler}: {e}")
-        
+        # Use unhook_all_hotkeys for clean removal
+        keyboard.unhook_all_hotkeys()
         hotkey_handlers.clear()
         logging.info("Hotkeys unregistered")
         
     except Exception as e:
         logging.error(f"Error unregistering hotkeys: {e}")
 
-def check_for_enter_key():
-    """Check for Enter key press (local fallback)"""
-    if msvcrt.kbhit():
-        key = msvcrt.getch()
-        if key == b'\r':  # Enter key
-            logging.info("Enter key pressed (local fallback)")
-            print("🔄 Enter pressed - reading clipboard...")
-            handle_read_request()
+
 
 def test_hotkeys():
     """Test if hotkeys are still working"""
@@ -347,39 +334,193 @@ def test_hotkeys():
         logging.warning(f"Hotkey test failed: {e}")
         return False
 
+def create_tray_icon():
+    """Create a simple icon for the system tray"""
+    # Create a simple icon
+    width = height = 64
+    image = Image.new('RGB', (width, height), color='blue')
+    draw = ImageDraw.Draw(image)
+    
+    # Draw a simple microphone icon
+    draw.ellipse([16, 40, 48, 56], fill='white')  # Base
+    draw.rectangle([28, 20, 36, 40], fill='white')  # Handle
+    draw.ellipse([20, 8, 44, 32], fill='white')  # Mic head
+    
+    return image
+
+def show_notification(title, message):
+    """Show a system notification"""
+    global tray_icon
+    if tray_icon and not debug_mode:
+        tray_icon.notify(message, title)
+    elif debug_mode:
+        print(f"{title}: {message}")
+
+def quit_application():
+    """Quit the application"""
+    global running, tray_icon
+    running = False
+    unregister_hotkeys()
+    if voice:
+        try:
+            voice.Speak("", 3)  # Stop any ongoing speech
+        except:
+            pass
+    if tray_icon:
+        tray_icon.stop()
+    pythoncom.CoUninitialize()
+    sys.exit(0)
+
+def show_about():
+    """Show about information"""
+    about_text = """SendToTTS v1.0.9
+    
+Clipboard to Text-to-Speech converter
+Supports Russian and English auto-detection
+
+Hotkeys:
+• Alt+Q - Read clipboard / interrupt & read new
+• Alt+Shift+Q - Stop speech
+
+Settings: Edit settings.ini to adjust speech rate and volume"""
+    show_notification("About SendToTTS", about_text)
+
+def create_tray_menu():
+    """Create the system tray menu"""
+    return pystray.Menu(
+        pystray.MenuItem("SendToTTS v1.0.8", lambda: None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Read Clipboard (Alt+Q)", lambda: handle_read_request()),
+        pystray.MenuItem("Stop Speech (Alt+Shift+Q)", lambda: handle_stop_request()),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("About", lambda: show_about()),
+        pystray.MenuItem("Quit", lambda: quit_application())
+    )
+
+def setup_tray():
+    """Setup system tray icon"""
+    global tray_icon
+    
+    if debug_mode:
+        return
+    
+    try:
+        icon_image = create_tray_icon()
+        tray_icon = pystray.Icon(
+            "SendToTTS",
+            icon_image,
+            "SendToTTS - Clipboard to Speech",
+            menu=create_tray_menu()
+        )
+        
+        # Run tray icon in a separate thread
+        tray_thread = threading.Thread(target=tray_icon.run, daemon=True)
+        tray_thread.start()
+        
+        logging.info("System tray icon created")
+        
+    except Exception as e:
+        logging.error(f"Failed to create system tray icon: {e}")
+        # Continue without tray icon
+
+def check_for_enter_key():
+    """Check for Enter key press (local fallback) - only in debug mode"""
+    if debug_mode and msvcrt.kbhit():
+        key = msvcrt.getch()
+        if key == b'\r':  # Enter key
+            logging.info("Enter key pressed (local fallback)")
+            print("🔄 Enter pressed - reading clipboard...")
+            handle_read_request()
+
+def hide_console_window():
+    """Hide the console window for windowless operation"""
+    if not debug_mode:
+        # Get console window handle
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            # Hide the console window
+            ctypes.windll.user32.ShowWindow(console_window, 0)  # SW_HIDE = 0
+
 def main():
     """Main application entry point"""
-    global running
+    global running, debug_mode
     
-    print("Starting Clipboard to TTS Application...")
-    print("\n=== Clipboard → TTS ===")
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='SendToTTS - Clipboard to Text-to-Speech')
+    parser.add_argument('--debug', action='store_true', 
+                       help='Run in debug mode with console window')
+    args = parser.parse_args()
+    
+    debug_mode = args.debug
+    
+    # Hide console window if not in debug mode
+    hide_console_window()
+    
+    # Configure logging based on mode
+    if debug_mode:
+        # Console mode - show everything
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('tts_debug.log'),
+                logging.StreamHandler()
+            ]
+        )
+        print("Starting Clipboard to TTS Application...")
+        print("\n=== Clipboard → TTS ===")
+    else:
+        # Tray mode - only log to file
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('tts_debug.log')
+            ]
+        )
+    
     logging.info("Application starting")
     
     # Initialize COM first
     pythoncom.CoInitialize()
     
-    # List available voices
-    list_available_voices()
+    # List available voices (only in debug mode)
+    if debug_mode:
+        list_available_voices()
     
     # Setup voice
     setup_voice()
     if not voice:
-        print("❌ Failed to initialize TTS voice")
+        if debug_mode:
+            print("❌ Failed to initialize TTS voice")
+        logging.error("Failed to initialize TTS voice")
         return
     
-    print("\nControls:")
-    print(" alt+q  – read clipboard / interrupt & read new (GLOBAL)")
-    print(" alt+shift+q – stop speech without reading (GLOBAL)")
-    print(" Enter – read clipboard (LOCAL - works only in this window)")
-    print(" Ctrl+C – exit")
+    if debug_mode:
+        print("\nControls:")
+        print(" alt+q  – read clipboard / interrupt & read new (GLOBAL)")
+        print(" alt+shift+q – stop speech without reading (GLOBAL)")
+        print(" Enter – read clipboard (LOCAL - works only in this window)")
+        print(" Ctrl+C – exit")
     
     # Register hotkeys
     if register_hotkeys():
-        print("✅ Global hotkeys registered successfully")
+        if debug_mode:
+            print("✅ Global hotkeys registered successfully")
+        logging.info("Global hotkeys registered successfully")
     else:
-        print("⚠️  Global hotkeys failed - Enter key fallback available")
+        if debug_mode:
+            print("⚠️  Global hotkeys failed - Enter key fallback available")
+        logging.warning("Global hotkeys failed")
     
-    print("Listening for hot-keys… (press Ctrl+C to quit)")
+    # Setup system tray (only in non-debug mode)
+    setup_tray()
+    
+    if debug_mode:
+        print("Listening for hot-keys… (press Ctrl+C to quit)")
+    else:
+        show_notification("SendToTTS Started", "Clipboard to speech is ready. Use Alt+Q to read clipboard.")
+    
     logging.info("Main loop starting")
     
     last_heartbeat = time.time()
@@ -387,8 +528,9 @@ def main():
     
     try:
         while running:
-            # Check for Enter key (local fallback)
-            check_for_enter_key()
+            # Check for Enter key (local fallback) - only in debug mode
+            if debug_mode:
+                check_for_enter_key()
             
             # Process event queue
             try:
@@ -412,26 +554,28 @@ def main():
             if current_time - last_hotkey_test >= 60:
                 if not test_hotkeys():
                     logging.warning("Hotkey test failed - attempting to re-register")
+                    # Clear existing hotkeys first
+                    unregister_hotkeys()
                     if register_hotkeys():
-                        print("🔄 Hotkeys re-registered successfully")
+                        if debug_mode:
+                            print("🔄 Hotkeys re-registered successfully")
+                        logging.info("Hotkeys re-registered successfully")
                     else:
-                        print("⚠️  Hotkey re-registration failed - Enter key still available")
+                        if debug_mode:
+                            print("⚠️  Hotkey re-registration failed - Enter key still available")
+                        logging.warning("Hotkey re-registration failed")
+                else:
+                    logging.debug("Hotkey test passed - no re-registration needed")
                 last_hotkey_test = current_time
             
             time.sleep(0.01)  # Small delay to prevent excessive CPU usage
             
     except KeyboardInterrupt:
-        print("\n🔄 Shutting down...")
+        if debug_mode:
+            print("\n🔄 Shutting down...")
         logging.info("Application shutting down")
     finally:
-        running = False
-        unregister_hotkeys()
-        if voice:
-            try:
-                voice.Speak("", 3)  # Stop any ongoing speech
-            except:
-                pass
-        pythoncom.CoUninitialize()
+        quit_application()
 
 if __name__ == "__main__":
     main() 

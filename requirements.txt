@@ -1,3 +1,5 @@
 pyperclip
 keyboard
-pypiwin32 
+pypiwin32
+pystray
+Pillow 
