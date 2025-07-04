@@ -1,145 +1,368 @@
-# v1.0.0
-"""
-Clipboard ➜ Windows TTS reader
+# SendToTTS Application v1.0.5
+# Reads clipboard content and converts to speech using Windows SAPI
+# Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
+# Local fallback: Enter key (works only when this window is focused)
 
-Core design (simplified):
-1. Single-threaded. We keep one SAPI.SpVoice instance.
-2. Use SVSFlagsAsync | SVSFPurgeBeforeSpeak (value 3) so every new Speak() call
-   automatically stops any current narration and starts the new one.
-3. A separate Stop hot-key just purges the queue (Skip) without new speech.
-4. The main loop pumps COM messages so async playback proceeds while the
-   program waits for hot-keys.
-"""
-
-import time
-import configparser
-import os
-import pyperclip
-import keyboard
-import pythoncom
 import win32com.client
+import win32clipboard
+import win32con
+import pythoncom
+import keyboard
+import time
+import threading
 import queue
+import logging
+import configparser
+import sys
+import os
+import msvcrt
 
-# ---------------------------------------------------------------------------
-# Configuration ----------------------------------------------------------------
-SETTINGS_FILE = "settings.ini"
-DEFAULT_SETTINGS = {
-    "speech_rate": 200,   # WPM ~200 ≈ SAPI rate 0
-    "volume": 0.9,        # 0-1 range → SAPI 0-100
-    "voice_id": ""        # Empty = default voice
-}
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('tts_debug.log'),
+        logging.StreamHandler()
+    ]
+)
 
-settings: dict[str, object] = DEFAULT_SETTINGS.copy()
+# Global variables
+voice = None
+event_queue = queue.Queue()
+last_hotkey_time = time.time()
+running = True
+hotkey_handlers = []
 
-# ---------------------------------------------------------------------------
-# Helpers ----------------------------------------------------------------------
+def load_settings():
+    """Load settings from settings.ini"""
+    config = configparser.ConfigParser()
+    
+    # Default settings
+    defaults = {
+        'speech_rate': '0',
+        'volume': '100',
+        'voice_id': ''
+    }
+    
+    if os.path.exists('settings.ini'):
+        config.read('settings.ini')
+        settings = {}
+        for key in defaults:
+            settings[key] = config.get('DEFAULT', key, fallback=defaults[key])
+    else:
+        settings = defaults
+        # Create default settings file
+        config['DEFAULT'] = defaults
+        with open('settings.ini', 'w') as f:
+            config.write(f)
+    
+    return settings
 
-def load_settings() -> None:
-    """Load/merge settings from settings.ini if present."""
-    cfg = configparser.ConfigParser()
-    if os.path.exists(SETTINGS_FILE):
-        cfg.read(SETTINGS_FILE)
-        if "TTS_SETTINGS" in cfg:
-            sect = cfg["TTS_SETTINGS"]
-            settings["speech_rate"] = sect.getint("speech_rate", fallback=settings["speech_rate"])
-            settings["volume"] = sect.getfloat("volume", fallback=settings["volume"])
-            settings["voice_id"] = sect.get("voice_id", fallback=settings["voice_id"])
-
-
-def wpm_to_sapi_rate(wpm: int) -> int:
-    """Convert ~100-300 WPM to SAPI rate (-10 … 10). Rough mapping."""
-    return max(-10, min(10, int((wpm - 200) / 10)))
-
-# ---------------------------------------------------------------------------
-# TTS Engine --------------------------------------------------------------------
-pythoncom.CoInitialize()
-_voice = win32com.client.Dispatch("SAPI.SpVoice")
-
-# event queue for cross-thread communication
-_event_q: queue.Queue = queue.Queue()
-
-def configure_voice() -> None:
-    """Apply current settings to the global _voice instance."""
-    _voice.Rate = wpm_to_sapi_rate(int(settings["speech_rate"]))
-    _voice.Volume = int(float(settings["volume"]) * 100)
-
-    if settings["voice_id"]:
-        for v in _voice.GetVoices():
-            if v.Id == settings["voice_id"]:
-                _voice.Voice = v
-                break
-
-
-def list_voices() -> None:
-    print("\n=== Available Voices ===")
-    for i, v in enumerate(_voice.GetVoices()):
-        print(f"{i+1}. {v.GetDescription()}")
-        print(f"   ID: {v.Id}")
-        print("-" * 40)
-    print("=" * 40)
-
-# ---------------------------------------------------------------------------
-# Hot-key handlers -------------------------------------------------------------
-
-SVSFlagsAsync = 1  # speak async
-SVSFPurgeBeforeSpeak = 2  # purge before speak
-FLAGS_PURGE_ASYNC = SVSFlagsAsync | SVSFPurgeBeforeSpeak  # 3
-
-
-def read_clipboard() -> None:
-    text: str = pyperclip.paste().strip()
-    if not text:
-        print("Clipboard empty – nothing to read.")
-        return
-    _event_q.put(("read", text))
-
-
-def stop_speech() -> None:
-    _event_q.put(("stop", None))
-
-# ---------------------------------------------------------------------------
-# Main -------------------------------------------------------------------------
-
-def main() -> None:
-    print("=== Clipboard → TTS ===")
-    load_settings()
-    configure_voice()
-    list_voices()
-
-    hotkey = "alt+q"
-    stop_hotkey = "alt+shift+q"
-    print("\nControls:")
-    print(f" {hotkey}  – read clipboard / interrupt & read new")
-    print(f" {stop_hotkey} – stop speech without reading")
-    print(" Ctrl+C – exit\n")
-
-    keyboard.add_hotkey(hotkey, read_clipboard)
-    keyboard.add_hotkey(stop_hotkey, stop_speech)
-
-    print("Listening for hot-keys… (press Ctrl+C to quit)")
+def list_available_voices():
+    """List all available TTS voices"""
     try:
-        while True:
-            # process COM messages so async speech plays
-            pythoncom.PumpWaitingMessages()
-            # handle queued events coming from hot-keys
+        temp_voice = win32com.client.Dispatch("SAPI.SpVoice")
+        voices = temp_voice.GetVoices()
+        
+        print("\n=== Available Voices ===")
+        for i in range(voices.Count):
+            voice_info = voices.Item(i)
+            name = voice_info.GetDescription()
+            voice_id = voice_info.Id
+            print(f"{i+1}. {name}")
+            print(f"   ID: {voice_id}")
+            print("-" * 40)
+        print("=" * 40)
+        
+        return voices
+    except Exception as e:
+        logging.error(f"Error listing voices: {e}")
+        return None
+
+def setup_voice():
+    """Initialize and configure the TTS voice"""
+    global voice
+    
+    try:
+        pythoncom.CoInitialize()
+        voice = win32com.client.Dispatch("SAPI.SpVoice")
+        settings = load_settings()
+        
+        # Set voice if specified
+        if settings['voice_id']:
+            voices = voice.GetVoices()
+            for i in range(voices.Count):
+                if voices.Item(i).Id == settings['voice_id']:
+                    voice.Voice = voices.Item(i)
+                    break
+        
+        # Set speech rate (-10 to 10)
+        voice.Rate = int(settings['speech_rate'])
+        
+        # Set volume (0 to 100)
+        voice.Volume = int(settings['volume'])
+        
+        logging.info(f"Voice configured: Rate={voice.Rate}, Volume={voice.Volume}")
+        
+    except Exception as e:
+        logging.error(f"Error setting up voice: {e}")
+        voice = None
+
+def read_clipboard():
+    """Read text from clipboard with retry logic"""
+    logging.debug("read_clipboard() called")
+    
+    for attempt in range(3):
+        try:
+            win32clipboard.OpenClipboard()
             try:
-                evt, payload = _event_q.get_nowait()
-                if evt == "read":
-                    sample = (payload[:80] + "…") if len(payload) > 80 else payload
-                    print(f"Reading: {sample}")
-                    _voice.Speak(payload, FLAGS_PURGE_ASYNC)
-                elif evt == "stop":
-                    _voice.Skip("Sentence", 1000)
-                    print("Speech stopped.")
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
+                    text = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                    if isinstance(text, bytes):
+                        text = text.decode('utf-8', errors='ignore')
+                    text = text.strip()
+                    if text:
+                        logging.debug(f"Clipboard text length: {len(text)}")
+                        return text
+                    else:
+                        logging.debug(f"Clipboard attempt {attempt + 1}: empty")
+                else:
+                    logging.debug(f"Clipboard attempt {attempt + 1}: no text format")
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as e:
+            logging.debug(f"Clipboard attempt {attempt + 1} failed: {e}")
+        
+        if attempt < 2:  # Don't sleep after the last attempt
+            time.sleep(0.1)
+    
+    logging.info("Clipboard empty after 3 attempts – nothing to read.")
+    return None
+
+def speak_text(text):
+    """Convert text to speech using SAPI with interruption support"""
+    global voice
+    
+    if not voice:
+        logging.error("Voice not initialized")
+        return
+    
+    try:
+        # Ensure COM is initialized for this thread
+        pythoncom.CoInitialize()
+        
+        # Stop any current speech and clear the queue
+        voice.Speak("", 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
+        
+        # Start new speech
+        logging.info(f"Starting TTS for text of length {len(text)}")
+        voice.Speak(text, 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
+        
+    except Exception as e:
+        logging.error(f"Error in speak_text: {e}")
+        # Try to reinitialize voice on COM error
+        if "CoInitialize" in str(e) or "-2147221008" in str(e) or "-2147352567" in str(e):
+            logging.warning("COM error detected - attempting to reinitialize voice")
+            try:
+                pythoncom.CoInitialize()
+                voice = win32com.client.Dispatch("SAPI.SpVoice")
+                settings = load_settings()
+                voice.Rate = int(settings['speech_rate'])
+                voice.Volume = int(settings['volume'])
+                voice.Speak(text, 3)
+                logging.info("Voice reinitialized successfully")
+            except Exception as reinit_error:
+                logging.error(f"Failed to reinitialize voice: {reinit_error}")
+
+def handle_read_request():
+    """Handle read clipboard request"""
+    global last_hotkey_time
+    last_hotkey_time = time.time()
+    
+    text = read_clipboard()
+    if text:
+        event_queue.put('read')
+        print(f"Reading: {text}")
+        speak_text(text)
+    else:
+        print("Clipboard empty – nothing to read.")
+
+def handle_stop_request():
+    """Handle stop speech request"""
+    global last_hotkey_time
+    last_hotkey_time = time.time()
+    
+    event_queue.put('stop')
+    try:
+        if voice:
+            voice.Speak("", 3)  # Stop current speech
+        print("🛑 Speech stopped")
+        logging.info("Speech stopped by user")
+    except Exception as e:
+        logging.error(f"Error stopping speech: {e}")
+
+def register_hotkeys():
+    """Register global hotkeys using keyboard library with robust error handling"""
+    global hotkey_handlers
+    
+    try:
+        # Clear any existing hotkeys
+        for handler in hotkey_handlers:
+            try:
+                keyboard.remove_hotkey(handler)
+            except:
+                pass
+        hotkey_handlers.clear()
+        
+        # Register new hotkeys with multiple attempts
+        for attempt in range(3):
+            try:
+                handler1 = keyboard.add_hotkey('alt+q', handle_read_request, suppress=True)
+                handler2 = keyboard.add_hotkey('alt+shift+q', handle_stop_request, suppress=True)
+                
+                if handler1 and handler2:
+                    hotkey_handlers = [handler1, handler2]
+                    logging.info("Keyboard library hotkeys registered successfully")
+                    return True
+                else:
+                    logging.warning(f"Hotkey registration attempt {attempt + 1} returned None")
+                    
+            except Exception as e:
+                logging.warning(f"Hotkey registration attempt {attempt + 1} failed: {e}")
+                
+            if attempt < 2:
+                time.sleep(0.5)  # Wait before retry
+        
+        logging.error("Failed to register hotkeys after 3 attempts")
+        return False
+        
+    except Exception as e:
+        logging.error(f"Error in register_hotkeys: {e}")
+        return False
+
+def unregister_hotkeys():
+    """Unregister global hotkeys"""
+    global hotkey_handlers
+    
+    try:
+        for handler in hotkey_handlers:
+            try:
+                keyboard.remove_hotkey(handler)
+                logging.debug(f"Removed hotkey handler: {handler}")
+            except Exception as e:
+                logging.warning(f"Error removing hotkey handler {handler}: {e}")
+        
+        hotkey_handlers.clear()
+        logging.info("Hotkeys unregistered")
+        
+    except Exception as e:
+        logging.error(f"Error unregistering hotkeys: {e}")
+
+def check_for_enter_key():
+    """Check for Enter key press (local fallback)"""
+    if msvcrt.kbhit():
+        key = msvcrt.getch()
+        if key == b'\r':  # Enter key
+            logging.info("Enter key pressed (local fallback)")
+            print("🔄 Enter pressed - reading clipboard...")
+            handle_read_request()
+
+def test_hotkeys():
+    """Test if hotkeys are still working"""
+    try:
+        # Simple test - check if keyboard module is responsive
+        keyboard.is_pressed('alt')
+        return True
+    except Exception as e:
+        logging.warning(f"Hotkey test failed: {e}")
+        return False
+
+def main():
+    """Main application entry point"""
+    global running
+    
+    print("Starting Clipboard to TTS Application...")
+    print("\n=== Clipboard → TTS ===")
+    logging.info("Application starting")
+    
+    # Initialize COM first
+    pythoncom.CoInitialize()
+    
+    # List available voices
+    list_available_voices()
+    
+    # Setup voice
+    setup_voice()
+    if not voice:
+        print("❌ Failed to initialize TTS voice")
+        return
+    
+    print("\nControls:")
+    print(" alt+q  – read clipboard / interrupt & read new (GLOBAL)")
+    print(" alt+shift+q – stop speech without reading (GLOBAL)")
+    print(" Enter – read clipboard (LOCAL - works only in this window)")
+    print(" Ctrl+C – exit")
+    
+    # Register hotkeys
+    if register_hotkeys():
+        print("✅ Global hotkeys registered successfully")
+    else:
+        print("⚠️  Global hotkeys failed - Enter key fallback available")
+    
+    print("Listening for hot-keys… (press Ctrl+C to quit)")
+    logging.info("Main loop starting")
+    
+    last_heartbeat = time.time()
+    last_hotkey_test = time.time()
+    
+    try:
+        while running:
+            # Check for Enter key (local fallback)
+            check_for_enter_key()
+            
+            # Process event queue
+            try:
+                event = event_queue.get_nowait()
+                logging.debug(f"Processing event: {event}")
             except queue.Empty:
                 pass
-            time.sleep(0.05)
+            
+            # Pump COM messages for SAPI
+            pythoncom.PumpWaitingMessages()
+            
+            current_time = time.time()
+            
+            # Heartbeat every 30 seconds
+            if current_time - last_heartbeat >= 30:
+                time_since_hotkey = current_time - last_hotkey_time
+                logging.debug(f"Heartbeat - Last hotkey: {time_since_hotkey:.1f}s ago")
+                last_heartbeat = current_time
+            
+            # Test hotkeys every 60 seconds and re-register if needed
+            if current_time - last_hotkey_test >= 60:
+                if not test_hotkeys():
+                    logging.warning("Hotkey test failed - attempting to re-register")
+                    if register_hotkeys():
+                        print("🔄 Hotkeys re-registered successfully")
+                    else:
+                        print("⚠️  Hotkey re-registration failed - Enter key still available")
+                last_hotkey_test = current_time
+            
+            time.sleep(0.01)  # Small delay to prevent excessive CPU usage
+            
     except KeyboardInterrupt:
-        print("\nExiting…")
+        print("\n🔄 Shutting down...")
+        logging.info("Application shutting down")
     finally:
-        stop_speech()
+        running = False
+        unregister_hotkeys()
+        if voice:
+            try:
+                voice.Speak("", 3)  # Stop any ongoing speech
+            except:
+                pass
         pythoncom.CoUninitialize()
-
 
 if __name__ == "__main__":
     main() 
