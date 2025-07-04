@@ -1,4 +1,4 @@
-# SendToTTS Application v1.0.9
+# SendToTTS Application v1.1.0
 # Reads clipboard content and converts to speech using Windows SAPI
 # Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
 # Runs completely windowless in system tray by default, use --debug for console mode
@@ -373,7 +373,7 @@ def quit_application():
 
 def show_about():
     """Show about information"""
-    about_text = """SendToTTS v1.0.9
+    about_text = """SendToTTS v1.1.0
     
 Clipboard to Text-to-Speech converter
 Supports Russian and English auto-detection
@@ -388,7 +388,7 @@ Settings: Edit settings.ini to adjust speech rate and volume"""
 def create_tray_menu():
     """Create the system tray menu"""
     return pystray.Menu(
-        pystray.MenuItem("SendToTTS v1.0.8", lambda: None, enabled=False),
+        pystray.MenuItem("SendToTTS v1.1.0", lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Read Clipboard (Alt+Q)", lambda: handle_read_request()),
         pystray.MenuItem("Stop Speech (Alt+Shift+Q)", lambda: handle_stop_request()),
