@@ -1,6 +1,0 @@
-use GitWorkflow
-description: This project uses GitWorkflow for git operations and branch management - simplified master-only structure
-description:
-globs:
-alwaysApply: false
----
