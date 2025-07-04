@@ -1,4 +1,4 @@
-# SendToTTS Application v1.0.5
+# SendToTTS Application v1.0.6
 # Reads clipboard content and converts to speech using Windows SAPI
 # Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
 # Local fallback: Enter key (works only when this window is focused)
@@ -16,6 +16,12 @@ import configparser
 import sys
 import os
 import msvcrt
+import re
+import argparse
+import win32gui
+import win32con
+import pystray
+from PIL import Image, ImageDraw
 
 # Configure logging
 logging.basicConfig(
@@ -38,11 +44,10 @@ def load_settings():
     """Load settings from settings.ini"""
     config = configparser.ConfigParser()
     
-    # Default settings
+    # Default settings (removed voice_id since we auto-detect language)
     defaults = {
         'speech_rate': '0',
-        'volume': '100',
-        'voice_id': ''
+        'volume': '100'
     }
     
     if os.path.exists('settings.ini'):
@@ -87,21 +92,9 @@ def setup_voice():
     try:
         pythoncom.CoInitialize()
         voice = win32com.client.Dispatch("SAPI.SpVoice")
-        settings = load_settings()
         
-        # Set voice if specified
-        if settings['voice_id']:
-            voices = voice.GetVoices()
-            for i in range(voices.Count):
-                if voices.Item(i).Id == settings['voice_id']:
-                    voice.Voice = voices.Item(i)
-                    break
-        
-        # Set speech rate (-10 to 10)
-        voice.Rate = int(settings['speech_rate'])
-        
-        # Set volume (0 to 100)
-        voice.Volume = int(settings['volume'])
+        # Apply initial settings (will be reapplied when voice changes)
+        apply_voice_settings()
         
         logging.info(f"Voice configured: Rate={voice.Rate}, Volume={voice.Volume}")
         
@@ -109,24 +102,58 @@ def setup_voice():
         logging.error(f"Error setting up voice: {e}")
         voice = None
 
+def apply_voice_settings():
+    """Apply speech rate and volume settings to current voice"""
+    global voice
+    
+    if not voice:
+        return
+    
+    try:
+        settings = load_settings()
+        
+        # Set speech rate (-10 to 10)
+        voice.Rate = int(settings['speech_rate'])
+        
+        # Set volume (0 to 100)
+        voice.Volume = int(settings['volume'])
+        
+        logging.debug(f"Applied settings: Rate={voice.Rate}, Volume={voice.Volume}")
+        
+    except Exception as e:
+        logging.error(f"Error applying voice settings: {e}")
+
 def read_clipboard():
-    """Read text from clipboard with retry logic"""
+    """Read text from clipboard with retry logic and proper Unicode support"""
     logging.debug("read_clipboard() called")
     
     for attempt in range(3):
         try:
             win32clipboard.OpenClipboard()
             try:
-                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
+                # Try Unicode format first (CF_UNICODETEXT)
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                    text = text.strip()
+                    if text:
+                        logging.debug(f"Clipboard text length: {len(text)} (Unicode)")
+                        # Log a safe representation of the text for debugging
+                        safe_text = text.encode('ascii', errors='replace').decode('ascii')
+                        logging.debug(f"Text preview: {safe_text[:50]}...")
+                        return text
+                    else:
+                        logging.debug(f"Clipboard attempt {attempt + 1}: empty (Unicode)")
+                # Fallback to regular text format
+                elif win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
                     text = win32clipboard.GetClipboardData(win32con.CF_TEXT)
                     if isinstance(text, bytes):
                         text = text.decode('utf-8', errors='ignore')
                     text = text.strip()
                     if text:
-                        logging.debug(f"Clipboard text length: {len(text)}")
+                        logging.debug(f"Clipboard text length: {len(text)} (ANSI)")
                         return text
                     else:
-                        logging.debug(f"Clipboard attempt {attempt + 1}: empty")
+                        logging.debug(f"Clipboard attempt {attempt + 1}: empty (ANSI)")
                 else:
                     logging.debug(f"Clipboard attempt {attempt + 1}: no text format")
             finally:
@@ -140,6 +167,46 @@ def read_clipboard():
     logging.info("Clipboard empty after 3 attempts – nothing to read.")
     return None
 
+def detect_language(text):
+    """Detect language of text and return appropriate voice ID"""
+    # Check for Cyrillic characters (Russian)
+    cyrillic_match = re.search(r'[а-яё]', text.lower())
+    if cyrillic_match:
+        logging.info(f"Russian text detected (found: '{cyrillic_match.group()}')")
+        return 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_RU-RU_IRINA_11.0'
+    
+    # Check for Hebrew characters
+    hebrew_match = re.search(r'[\u0590-\u05ff]', text)
+    if hebrew_match:
+        logging.info("Hebrew text detected, but no Hebrew voice available")
+        return None
+    
+    # Default to English
+    logging.info("English text detected (default)")
+    return 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-US_ZIRA_11.0'
+
+def set_voice_by_language(text):
+    """Set the appropriate voice based on detected language"""
+    global voice
+    
+    if not voice:
+        return
+    
+    try:
+        voice_id = detect_language(text)
+        if voice_id:
+            voices = voice.GetVoices()
+            for i in range(voices.Count):
+                if voices.Item(i).Id == voice_id:
+                    voice.Voice = voices.Item(i)
+                    logging.info(f"Switched to voice: {voices.Item(i).GetDescription()}")
+                    
+                    # Apply speech rate and volume settings to the new voice
+                    apply_voice_settings()
+                    break
+    except Exception as e:
+        logging.error(f"Error setting voice by language: {e}")
+
 def speak_text(text):
     """Convert text to speech using SAPI with interruption support"""
     global voice
@@ -151,6 +218,9 @@ def speak_text(text):
     try:
         # Ensure COM is initialized for this thread
         pythoncom.CoInitialize()
+        
+        # Set appropriate voice based on language
+        set_voice_by_language(text)
         
         # Stop any current speech and clear the queue
         voice.Speak("", 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
@@ -167,9 +237,8 @@ def speak_text(text):
             try:
                 pythoncom.CoInitialize()
                 voice = win32com.client.Dispatch("SAPI.SpVoice")
-                settings = load_settings()
-                voice.Rate = int(settings['speech_rate'])
-                voice.Volume = int(settings['volume'])
+                # Set appropriate voice for the text and apply settings
+                set_voice_by_language(text)
                 voice.Speak(text, 3)
                 logging.info("Voice reinitialized successfully")
             except Exception as reinit_error:
