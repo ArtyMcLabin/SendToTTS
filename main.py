@@ -1,4 +1,4 @@
-# SendToTTS Application v1.1.0
+# SendToTTS Application v1.1.1
 # Reads clipboard content and converts to speech using Windows SAPI
 # Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
 # Runs completely windowless in system tray by default, use --debug for console mode
@@ -388,7 +388,7 @@ Settings: Edit settings.ini to adjust speech rate and volume"""
 def create_tray_menu():
     """Create the system tray menu"""
     return pystray.Menu(
-        pystray.MenuItem("SendToTTS v1.1.0", lambda: None, enabled=False),
+        pystray.MenuItem("SendToTTS v1.1.1", lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Read Clipboard (Alt+Q)", lambda: handle_read_request()),
         pystray.MenuItem("Stop Speech (Alt+Shift+Q)", lambda: handle_stop_request()),
@@ -458,7 +458,7 @@ def main():
     
     # Configure logging based on mode
     if debug_mode:
-        # Console mode - show everything
+        # Console mode - show everything and log to file
         logging.basicConfig(
             level=logging.DEBUG,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -470,12 +470,12 @@ def main():
         print("Starting Clipboard to TTS Application...")
         print("\n=== Clipboard → TTS ===")
     else:
-        # Tray mode - only log to file
+        # Tray mode - no file logging, only console (which is hidden)
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('tts_debug.log')
+                logging.StreamHandler()
             ]
         )
     
