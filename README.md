@@ -1,10 +1,10 @@
 # SendToTTS
 
-A Windows application that reads clipboard content using Text-to-Speech (TTS) with global hotkeys. Runs in the system tray by default.
+A Windows application that reads clipboard content using Text-to-Speech (TTS) with global hotkeys. Runs completely windowless in the system tray by default.
 
 ## Features
 
-- **System Tray Integration**: Runs silently in the background with tray icon
+- **System Tray Integration**: Runs completely windowless in the background with tray icon
 - **Global Hotkeys**: 
   - `Alt+Q` - Read clipboard content / interrupt current speech and read new content
   - `Alt+Shift+Q` - Stop speech without reading new content
@@ -14,6 +14,7 @@ A Windows application that reads clipboard content using Text-to-Speech (TTS) wi
 - **Configurable Settings**: Adjust speech rate and volume via settings.ini
 - **24/7 Operation**: Runs continuously with automatic error recovery
 - **Robust Error Handling**: Self-healing hotkey system with automatic re-registration
+- **No Multiple Hotkey Firing**: Fixed hotkey registration to prevent multiple executions
 
 ## Installation
 
