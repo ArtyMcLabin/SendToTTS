@@ -27,10 +27,11 @@ A Windows application that reads clipboard content using Text-to-Speech (TTS) wi
 ## Usage
 
 ### Normal Operation (System Tray)
+Double-click `run.bat` or run:
 ```bash
-python main.py
+pythonw main.py
 ```
-The application will run in the system tray. Right-click the tray icon to access menu options.
+The application will run completely windowless in the system tray. Right-click the tray icon to access menu options.
 
 ### Debug Mode (Console Window)
 Double-click `debug.bat` or run:

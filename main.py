@@ -1,4 +1,4 @@
-# SendToTTS Application v1.1.1
+# SendToTTS Application v1.1.3
 # Reads clipboard content and converts to speech using Windows SAPI
 # Global hotkeys: Alt+Q (read/interrupt), Alt+Shift+Q (stop only)
 # Runs completely windowless in system tray by default, use --debug for console mode
@@ -388,7 +388,7 @@ Settings: Edit settings.ini to adjust speech rate and volume"""
 def create_tray_menu():
     """Create the system tray menu"""
     return pystray.Menu(
-        pystray.MenuItem("SendToTTS v1.1.1", lambda: None, enabled=False),
+        pystray.MenuItem("SendToTTS v1.1.3", lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Read Clipboard (Alt+Q)", lambda: handle_read_request()),
         pystray.MenuItem("Stop Speech (Alt+Shift+Q)", lambda: handle_stop_request()),
@@ -400,9 +400,6 @@ def create_tray_menu():
 def setup_tray():
     """Setup system tray icon"""
     global tray_icon
-    
-    if debug_mode:
-        return
     
     try:
         icon_image = create_tray_icon()
@@ -453,7 +450,7 @@ def main():
     
     debug_mode = args.debug
     
-    # Hide console window if not in debug mode
+    # Hide console window if not in debug mode (this is now the default)
     hide_console_window()
     
     # Configure logging based on mode
@@ -470,12 +467,12 @@ def main():
         print("Starting Clipboard to TTS Application...")
         print("\n=== Clipboard → TTS ===")
     else:
-        # Tray mode - no file logging, only console (which is hidden)
+        # Tray mode - minimal logging to prevent console output
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.WARNING,  # Only log warnings and errors
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.StreamHandler()
+                logging.NullHandler()  # Discard all log messages in tray mode
             ]
         )
     
@@ -513,7 +510,7 @@ def main():
             print("⚠️  Global hotkeys failed - Enter key fallback available")
         logging.warning("Global hotkeys failed")
     
-    # Setup system tray (only in non-debug mode)
+    # Setup system tray (now runs in both modes, but only shows notifications in tray mode)
     setup_tray()
     
     if debug_mode:
@@ -544,10 +541,11 @@ def main():
             
             current_time = time.time()
             
-            # Heartbeat every 30 seconds
+            # Heartbeat every 30 seconds (only log in debug mode)
             if current_time - last_heartbeat >= 30:
                 time_since_hotkey = current_time - last_hotkey_time
-                logging.debug(f"Heartbeat - Last hotkey: {time_since_hotkey:.1f}s ago")
+                if debug_mode:
+                    logging.debug(f"Heartbeat - Last hotkey: {time_since_hotkey:.1f}s ago")
                 last_heartbeat = current_time
             
             # Test hotkeys every 60 seconds and re-register if needed
@@ -565,7 +563,8 @@ def main():
                             print("⚠️  Hotkey re-registration failed - Enter key still available")
                         logging.warning("Hotkey re-registration failed")
                 else:
-                    logging.debug("Hotkey test passed - no re-registration needed")
+                    if debug_mode:
+                        logging.debug("Hotkey test passed - no re-registration needed")
                 last_hotkey_test = current_time
             
             time.sleep(0.01)  # Small delay to prevent excessive CPU usage
