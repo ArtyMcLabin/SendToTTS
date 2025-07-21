@@ -286,8 +286,8 @@ def register_hotkeys():
         # Register new hotkeys with multiple attempts
         for attempt in range(3):
             try:
-                handler1 = keyboard.add_hotkey('alt+q', handle_read_request, suppress=True)
-                handler2 = keyboard.add_hotkey('alt+shift+q', handle_stop_request, suppress=True)
+                handler1 = keyboard.add_hotkey('alt+q', handle_read_request, suppress=False)
+                handler2 = keyboard.add_hotkey('alt+shift+q', handle_stop_request, suppress=False)
                 
                 if handler1 and handler2:
                     hotkey_handlers = [handler1, handler2]
