@@ -1,5 +1,11 @@
 # SendToTTS
 
+> **⚠️ PROJECT STATUS: PAUSED & EXPERIMENTAL**
+> 
+> **This project is currently EXPERIMENTAL and NOT STABLE for day-to-day work.**  
+> **Development is paused with no plans for fixing issues in the near future.**  
+> **Use at your own risk.**
+
 A Windows application that reads clipboard content using Text-to-Speech (TTS) with global hotkeys. Runs completely windowless in the system tray by default.
 
 ## Features
